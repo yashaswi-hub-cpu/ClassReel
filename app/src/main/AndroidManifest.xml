@@ -4,6 +4,12 @@
     <!-- Only used once, to download the offline caption model -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Lets the Library tab list the videos on this phone -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"

@@ -13,11 +13,16 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+        // Phones are ARM; dropping x86 libs roughly halves the APK
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("debug") // installable without a keystore
         }
     }
 

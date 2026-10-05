@@ -79,6 +79,32 @@ class CaptionEngine(private val ctx: Context) {
 
     private var segStart = -1L
     private var lastEnd = 0L
+    private var gain = 1.0 // only touched on the worker thread
+
+    /** Evens out quiet / uneven classroom audio before recognition (smoothed, max 8x boost). */
+    private fun level(pcm: ByteArray): ByteArray {
+        val n = pcm.size / 2
+        if (n == 0) return pcm
+        var sumSq = 0.0
+        for (i in 0 until n) {
+            val v = ((pcm[2 * i + 1].toInt() shl 8) or (pcm[2 * i].toInt() and 0xFF)).toShort().toInt()
+            sumSq += v.toDouble() * v
+        }
+        val rms = Math.sqrt(sumSq / n)
+        if (rms > 150) { // ignore near-silence so noise isn't amplified
+            val want = (3000.0 / rms).coerceIn(1.0, 8.0)
+            gain += (want - gain) * 0.2
+        }
+        if (gain < 1.05) return pcm
+        val out = ByteArray(pcm.size)
+        for (i in 0 until n) {
+            val v = ((pcm[2 * i + 1].toInt() shl 8) or (pcm[2 * i].toInt() and 0xFF)).toShort().toInt()
+            val o = (v * gain).toInt().coerceIn(-32768, 32767)
+            out[2 * i] = (o and 0xFF).toByte()
+            out[2 * i + 1] = ((o shr 8) and 0xFF).toByte()
+        }
+        return out
+    }
 
     private fun modelDir(m: CaptionModel) = File(ctx.filesDir, "models/${m.folder}")
     fun isDownloaded(m: CaptionModel) = File(modelDir(m), ".done").exists()
@@ -95,7 +121,26 @@ class CaptionEngine(private val ctx: Context) {
         ensureReady()
     }
 
+    /** Quietly downloads the model in the background for people who already use captions. */
+    suspend fun prefetchIfWanted() {
+        if (!prefs.getBoolean("wants_cc", false)) return
+        lock.withLock {
+            val m = model
+            if (isDownloaded(m)) return
+            withContext(Dispatchers.IO) {
+                try {
+                    state.value = ModelState.Downloading(0)
+                    download(m)
+                    state.value = ModelState.Missing
+                } catch (_: Throwable) {
+                    state.value = ModelState.Missing
+                }
+            }
+        }
+    }
+
     suspend fun ensureReady() {
+        prefs.edit().putBoolean("wants_cc", true).apply()
         lock.withLock {
             if (state.value == ModelState.Ready && recognizer != null) return
             val m = model
@@ -121,23 +166,42 @@ class CaptionEngine(private val ctx: Context) {
 
     private fun download(m: CaptionModel) {
         val root = File(ctx.filesDir, "models").apply { mkdirs() }
-        val tmp = File(ctx.cacheDir, m.folder + ".zip")
-        val conn = URL(m.url).openConnection() as HttpURLConnection
-        conn.connectTimeout = 20_000
-        conn.readTimeout = 30_000
-        conn.instanceFollowRedirects = true
-        val total = conn.contentLengthLong.takeIf { it > 0 } ?: (m.sizeMb * 1024L * 1024L)
-        var done = 0L
-        conn.inputStream.use { input ->
-            tmp.outputStream().use { out ->
-                val buf = ByteArray(64 * 1024)
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                    done += n
-                    state.value = ModelState.Downloading(((done * 100) / total).toInt().coerceIn(0, 99))
+        val tmp = File(ctx.filesDir, m.folder + ".zip.part") // survives app restarts so it can resume
+        var attempts = 0
+        while (true) {
+            try {
+                val have = if (tmp.exists()) tmp.length() else 0L
+                val conn = URL(m.url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 15_000
+                conn.readTimeout = 20_000
+                conn.instanceFollowRedirects = true
+                if (have > 0) conn.setRequestProperty("Range", "bytes=$have-")
+                val resumed = conn.responseCode == 206
+                if (!resumed && have > 0) tmp.delete() // server ignored Range: start over
+                val len = conn.contentLengthLong
+                val total = if (len > 0) (if (resumed) len + have else len) else m.sizeMb * 1024L * 1024L
+                var done = if (resumed) have else 0L
+                var lastPct = -1
+                conn.inputStream.use { input ->
+                    java.io.FileOutputStream(tmp, resumed).use { out ->
+                        val buf = ByteArray(256 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            done += n
+                            val pct = ((done * 100) / total).toInt().coerceIn(0, 99)
+                            if (pct != lastPct) {
+                                lastPct = pct
+                                state.value = ModelState.Downloading(pct)
+                            }
+                        }
+                    }
                 }
+                break
+            } catch (e: java.io.IOException) {
+                if (++attempts >= 6) throw e
+                Thread.sleep(1500L * attempts)
             }
         }
         state.value = ModelState.Loading
@@ -176,14 +240,15 @@ class CaptionEngine(private val ctx: Context) {
     /** Called from the audio thread. Never blocks; drops audio if recognition falls behind. */
     fun feed(pcm: ByteArray, startMs: Long, endMs: Long) {
         if (!active || recognizer == null) return
-        if (pending.get() > 40) return
+        if (pending.get() > 1500) return
         pending.incrementAndGet()
         worker.execute {
             try {
                 val r = recognizer ?: return@execute
                 if (segStart < 0) segStart = startMs
                 lastEnd = endMs
-                if (r.acceptWaveForm(pcm, pcm.size)) {
+                val data = level(pcm)
+                if (r.acceptWaveForm(data, data.size)) {
                     emitFinal(JSONObject(r.result).optString("text"), endMs)
                 } else {
                     val p = JSONObject(r.partialResult).optString("partial")

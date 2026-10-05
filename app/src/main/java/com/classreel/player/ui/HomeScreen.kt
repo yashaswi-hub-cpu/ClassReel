@@ -34,6 +34,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -52,8 +53,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.classreel.player.data.DeviceVideo
 import com.classreel.player.data.HistoryItem
 import com.classreel.player.data.HistoryStore
+import com.classreel.player.data.VideoLibrary
 import com.classreel.player.util.ago
 import com.classreel.player.util.fmtTime
 import kotlinx.coroutines.Dispatchers
@@ -89,11 +92,19 @@ private fun loadFrame(ctx: Context, item: HistoryItem): Bitmap? {
 @Composable
 fun HomeScreen(
     store: HistoryStore,
+    hasStorage: Boolean,
+    onGrantStorage: () -> Unit,
     onPick: () -> Unit,
-    onOpen: (HistoryItem) -> Unit
+    onOpen: (HistoryItem) -> Unit,
+    onOpenVideo: (DeviceVideo) -> Unit
 ) {
+    val ctx = LocalContext.current
     var items by remember { mutableStateOf(store.all()) }
+    var tab by remember { mutableIntStateOf(if (items.isEmpty()) 0 else 1) }
     val hero = items.firstOrNull { !it.finished } ?: items.firstOrNull()
+    val videos by produceState(initialValue = emptyList<DeviceVideo>(), hasStorage, tab) {
+        value = if (hasStorage && tab == 0) withContext(Dispatchers.IO) { VideoLibrary.query(ctx) } else emptyList()
+    }
 
     Box(Modifier.fillMaxSize().background(Ink)) {
         LazyColumn(
@@ -101,20 +112,37 @@ fun HomeScreen(
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 130.dp)
         ) {
             item { Header() }
-            if (hero == null) {
-                item { EmptyState() }
+            item { Tabs(tab) { tab = it; if (it == 1) items = store.all() } }
+            if (tab == 0) {
+                if (!hasStorage) {
+                    item { StoragePrompt(onGrantStorage) }
+                } else if (videos.isEmpty()) {
+                    item {
+                        Text(
+                            "No videos found on this phone.",
+                            color = Muted, fontSize = 14.sp,
+                            modifier = Modifier.padding(top = 40.dp)
+                        )
+                    }
+                } else {
+                    items(videos, key = { it.uri.toString() }) { v -> LibraryRow(v) { onOpenVideo(v) } }
+                }
             } else {
-                item { HeroCard(hero) { onOpen(hero) } }
-                item { SectionTitle("All lectures") }
-                items(items, key = { it.uri }) { it2 ->
-                    HistoryRow(
-                        item = it2,
-                        onClick = { onOpen(it2) },
-                        onRemove = {
-                            store.remove(it2.uri)
-                            items = store.all()
-                        }
-                    )
+                if (hero == null) {
+                    item { EmptyState() }
+                } else {
+                    item { HeroCard(hero) { onOpen(hero) } }
+                    item { SectionTitle("History") }
+                    items(items, key = { it.uri }) { it2 ->
+                        HistoryRow(
+                            item = it2,
+                            onClick = { onOpen(it2) },
+                            onRemove = {
+                                store.remove(it2.uri)
+                                items = store.all()
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -134,6 +162,81 @@ fun HomeScreen(
                 Spacer(Modifier.width(8.dp))
                 Text("Open a video", color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
             }
+        }
+    }
+}
+
+@Composable
+private fun Tabs(selected: Int, onSelect: (Int) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        listOf("Library", "History").forEachIndexed { i, label ->
+            val on = i == selected
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(if (on) Amber else Slate2)
+                    .clickable { onSelect(i) }
+                    .padding(horizontal = 20.dp, vertical = 10.dp)
+            ) {
+                Text(label, color = if (on) Ink else Chalk, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun StoragePrompt(onGrant: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(top = 40.dp)) {
+        Text(
+            "See all the videos on your phone",
+            color = Chalk, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 20.sp
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Allow access to your videos so they show up here. You can still use \"Open a video\" without it.",
+            color = Muted, fontSize = 14.sp
+        )
+        Spacer(Modifier.height(16.dp))
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(24.dp))
+                .background(Slate2)
+                .clickable(onClick = onGrant)
+                .padding(horizontal = 22.dp, vertical = 12.dp)
+        ) {
+            Text("Allow access", color = Amber, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+        }
+    }
+}
+
+@Composable
+private fun LibraryRow(v: DeviceVideo, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Slate)
+            .clickable(onClick = onClick)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(Slate2),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Filled.PlayArrow, null, tint = Amber)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(v.name, color = Chalk, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                "${v.folder} · ${fmtTime(v.durationMs)}",
+                color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
@@ -198,12 +301,12 @@ private fun EmptyState() {
         }
         Spacer(Modifier.height(20.dp))
         Text(
-            "Nothing played yet",
+            "No history yet",
             color = Chalk, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 22.sp
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            "Open a lecture below. The app will remember the minute you stop at.",
+            "Play a lecture and it shows up here, with the minute you stopped at.",
             color = Muted, fontSize = 14.sp
         )
     }

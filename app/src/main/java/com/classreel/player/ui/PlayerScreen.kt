@@ -80,7 +80,9 @@ import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -118,7 +120,16 @@ private fun buildPlayer(ctx: Context, tap: AudioTap): ExoPlayer {
                 .build()
     }
     factory.setEnableDecoderFallback(true)
-    return ExoPlayer.Builder(ctx, factory).build()
+    // Keep 45 s of already-played video in memory so -10/-20/-30 jump back instantly,
+    // and snap seeks to the nearest keyframe so they don't have to decode from far back.
+    val load = DefaultLoadControl.Builder()
+        .setBufferDurationsMs(15_000, 40_000, 500, 1_000)
+        .setBackBuffer(45_000, true)
+        .build()
+    return ExoPlayer.Builder(ctx, factory)
+        .setLoadControl(load)
+        .build()
+        .apply { setSeekParameters(SeekParameters.CLOSEST_SYNC) }
 }
 
 @OptIn(UnstableApi::class, ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -259,6 +270,9 @@ fun PlayerScreen(
             delay(200)
         }
     }
+
+    // If captions were used before, fetch the model while the video plays
+    LaunchedEffect(Unit) { engine.prefetchIfWanted() }
 
     // Captions on/off
     LaunchedEffect(ccOn) {

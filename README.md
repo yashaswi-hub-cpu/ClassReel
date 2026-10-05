@@ -9,6 +9,10 @@ Video player for lectures. Kotlin + Jetpack Compose + Media3 (ExoPlayer) + Vosk 
 - CC captions: Hinglish (Hindi speech written in English letters) or English (Indian accent). Runs offline after a one-time ~40 MB download.
 - History: remembers the exact second you stopped in each video. Reopen the app days later and tap Resume.
 
+## Home screen
+- Library tab: every video on your phone (asks for video access once). History tab: what you've watched, with resume.
+- Use the `ClassReel-release-apk` artifact for daily use (smaller and faster); `ClassReel-debug-apk` is for troubleshooting.
+
 ## Build
 GitHub: push to `main` -> Actions -> artifact `ClassReel-debug-apk`.
 Local (proot ubuntu): `./gradlew assembleDebug` -> `app/build/outputs/apk/debug/app-debug.apk`

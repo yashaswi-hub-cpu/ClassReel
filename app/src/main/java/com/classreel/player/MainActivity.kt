@@ -1,6 +1,10 @@
 package com.classreel.player
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -19,6 +23,7 @@ import androidx.compose.ui.Modifier
 import com.classreel.player.captions.CaptionEngine
 import com.classreel.player.data.HistoryItem
 import com.classreel.player.data.HistoryStore
+import com.classreel.player.data.DeviceVideo
 import com.classreel.player.ui.ClassReelTheme
 import com.classreel.player.ui.HomeScreen
 import com.classreel.player.ui.Ink
@@ -30,6 +35,23 @@ class MainActivity : ComponentActivity() {
     private val store by lazy { HistoryStore(applicationContext) }
     private val engine by lazy { CaptionEngine(applicationContext) }
     private var current by mutableStateOf<VideoSource?>(null)
+
+    private var hasStorage by mutableStateOf(false)
+
+    private fun storagePermission() =
+        if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_VIDEO
+        else Manifest.permission.READ_EXTERNAL_STORAGE
+
+    private fun checkStorage() =
+        ContextCompat.checkSelfPermission(this, storagePermission()) == PackageManager.PERMISSION_GRANTED
+
+    private val storageRequest =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { hasStorage = it }
+
+    override fun onResume() {
+        super.onResume()
+        hasStorage = checkStorage()
+    }
 
     private val picker =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -48,6 +70,9 @@ class MainActivity : ComponentActivity() {
                     if (video == null) {
                         HomeScreen(
                             store = store,
+                            hasStorage = hasStorage,
+                            onGrantStorage = { storageRequest.launch(storagePermission()) },
+                            onOpenVideo = { v: DeviceVideo -> open(v.uri, persist = false) },
                             onPick = {
                                 picker.launch(
                                     arrayOf("video/*", "application/x-matroska", "application/octet-stream")
