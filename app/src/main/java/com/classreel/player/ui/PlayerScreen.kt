@@ -26,12 +26,16 @@ import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
@@ -58,11 +62,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -99,7 +107,7 @@ import kotlinx.coroutines.launch
 
 data class VideoSource(val uri: Uri, val name: String)
 
-private enum class Sheet { None, Speed, Captions }
+private enum class Sheet { None, Speed, Captions, Jump }
 
 private val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f)
 
@@ -120,16 +128,20 @@ private fun buildPlayer(ctx: Context, tap: AudioTap): ExoPlayer {
                 .build()
     }
     factory.setEnableDecoderFallback(true)
-    // Keep 45 s of already-played video in memory so -10/-20/-30 jump back instantly,
-    // and snap seeks to the nearest keyframe so they don't have to decode from far back.
+    // Async codec queueing keeps the decoder fed on its own thread: fewer dropped frames (VLC-like smoothness)
+    factory.forceEnableMediaCodecAsynchronousQueueing()
+    // Keep 60 s of already-played video in memory so going back is instant,
+    // and buffer further ahead so playback never stalls.
     val load = DefaultLoadControl.Builder()
-        .setBufferDurationsMs(15_000, 40_000, 500, 1_000)
-        .setBackBuffer(45_000, true)
+        .setBufferDurationsMs(20_000, 60_000, 400, 1_000)
+        .setBackBuffer(60_000, true)
         .build()
     return ExoPlayer.Builder(ctx, factory)
         .setLoadControl(load)
         .build()
-        .apply { setSeekParameters(SeekParameters.CLOSEST_SYNC) }
+        // Frame-exact seeks (skip buttons, jump to time, resume land on the exact second).
+        // Fast keyframe seeks are used only while dragging the seek bar.
+        .apply { setSeekParameters(SeekParameters.EXACT) }
 }
 
 @OptIn(UnstableApi::class, ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -163,6 +175,8 @@ fun PlayerScreen(
     var sheet by remember { mutableStateOf(Sheet.None) }
     var dragging by remember { mutableStateOf(false) }
     var dragPos by remember { mutableFloatStateOf(0f) }
+    var resumeAfterScrub by remember { mutableStateOf(false) }
+    var lastScrubSeek by remember { mutableLongStateOf(0L) }
     var note by remember { mutableStateOf<String?>(null) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var landscape by remember { mutableStateOf(false) }
@@ -259,15 +273,20 @@ fun PlayerScreen(
     // Position ticker, caption lookup, and periodic history save
     LaunchedEffect(Unit) {
         var lastSave = 0L
+        var lastCaption = 0L
         while (true) {
             if (!dragging) posMs = exo.currentPosition.coerceAtLeast(0)
-            caption = if (ccOn) engine.captionAt(posMs) else null
             val now = SystemClock.elapsedRealtime()
+            if (now - lastCaption >= 200) {
+                caption = if (ccOn) engine.captionAt(posMs) else null
+                lastCaption = now
+            }
             if (now - lastSave > 5_000) {
                 if (exo.isPlaying) saveProgress()
                 lastSave = now
             }
-            delay(200)
+            // Fast updates while the seek bar is on screen so it glides; relaxed otherwise
+            delay(if (controlsVisible) 50L else 200L)
         }
     }
 
@@ -482,19 +501,39 @@ fun PlayerScreen(
                         .padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 14.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Tap the time to jump to any moment
                         Text(
                             fmtTime(if (dragging) dragPos.toLong() else posMs),
-                            color = Chalk, fontFamily = FontFamily.Monospace, fontSize = 13.sp
+                            color = Amber, fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold, fontSize = 13.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .border(1.dp, Amber.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
+                                .clickable { sheet = Sheet.Jump; tick++ }
+                                .padding(horizontal = 8.dp, vertical = 5.dp)
                         )
                         Slider(
                             value = if (dragging) dragPos else posMs.toFloat().coerceAtMost(maxOf(durMs, 1L).toFloat()),
                             onValueChange = {
-                                dragging = true
+                                if (!dragging) {
+                                    // Scrub like VLC: pause, then show the frame under your finger
+                                    dragging = true
+                                    resumeAfterScrub = exo.playWhenReady
+                                    exo.pause()
+                                    exo.setSeekParameters(SeekParameters.CLOSEST_SYNC)
+                                }
                                 dragPos = it
+                                val now = SystemClock.elapsedRealtime()
+                                if (now - lastScrubSeek > 90) {
+                                    lastScrubSeek = now
+                                    exo.seekTo(it.toLong())
+                                }
                                 tick++
                             },
                             onValueChangeFinished = {
+                                exo.setSeekParameters(SeekParameters.EXACT)
                                 seekTo(dragPos.toLong())
+                                if (resumeAfterScrub) exo.play()
                                 dragging = false
                             },
                             valueRange = 0f..maxOf(durMs, 1L).toFloat(),
@@ -571,6 +610,19 @@ fun PlayerScreen(
             }
         }
 
+        if (sheet == Sheet.Jump) {
+            JumpSheet(
+                currentMs = posMs,
+                durMs = durMs,
+                onGo = { t ->
+                    seekTo(t)
+                    sheet = Sheet.None
+                    note = "Jumped to ${fmtTime(t)}"
+                },
+                onDismiss = { sheet = Sheet.None }
+            )
+        }
+
         if (sheet == Sheet.Captions) {
             ModalBottomSheet(onDismissRequest = { sheet = Sheet.None }, containerColor = Slate) {
                 Column(Modifier.padding(horizontal = 22.dp).padding(bottom = 32.dp)) {
@@ -615,6 +667,130 @@ fun PlayerScreen(
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun JumpSheet(
+    currentMs: Long,
+    durMs: Long,
+    onGo: (Long) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var h by remember { mutableStateOf("") }
+    var m by remember { mutableStateOf("") }
+    var s by remember { mutableStateOf("") }
+    // Where the video is right now, shown faintly in the empty boxes
+    val nowS = currentMs / 1000
+    val entered = h.isNotEmpty() || m.isNotEmpty() || s.isNotEmpty()
+    val totalMs = ((h.toLongOrNull() ?: 0L) * 3600 + (m.toLongOrNull() ?: 0L) * 60 + (s.toLongOrNull() ?: 0L)) * 1000
+    val tooFar = durMs > 0 && totalMs > durMs
+
+    fun go() {
+        if (!entered) return
+        onGo(if (durMs > 0) totalMs.coerceAtMost(durMs) else totalMs)
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Slate) {
+        Column(Modifier.padding(horizontal = 22.dp).padding(bottom = 32.dp).imePadding()) {
+            Text(
+                "Jump to time", color = Chalk, fontFamily = FontFamily.Serif,
+                fontWeight = FontWeight.Bold, fontSize = 22.sp
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Now at ${fmtTime(currentMs)}  of  ${fmtTime(durMs)}",
+                color = Muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.Top) {
+                TimeField(
+                    value = h, hint = "%02d".format(nowS / 3600), label = "hours",
+                    imeAction = ImeAction.Next, onChange = { h = it }, onGo = ::go,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(":", color = Chalk, fontSize = 28.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp))
+                TimeField(
+                    value = m, hint = "%02d".format((nowS % 3600) / 60), label = "minutes",
+                    imeAction = ImeAction.Next, onChange = { m = it }, onGo = ::go,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(":", color = Chalk, fontSize = 28.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp))
+                TimeField(
+                    value = s, hint = "%02d".format(nowS % 60), label = "seconds",
+                    imeAction = ImeAction.Go, onChange = { s = it }, onGo = ::go,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            if (tooFar) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "This video is only ${fmtTime(durMs)} long, so it will jump to the end.",
+                    color = Amber, fontSize = 13.sp
+                )
+            }
+            Spacer(Modifier.height(18.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                ToolChip("Start", false) { onGo(0L) }
+                Spacer(Modifier.weight(1f))
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(if (entered) Amber else Amber.copy(alpha = 0.35f))
+                        .clickable(enabled = entered) { go() }
+                        .padding(horizontal = 36.dp, vertical = 12.dp)
+                ) { Text("Go", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TimeField(
+    value: String,
+    hint: String,
+    label: String,
+    imeAction: ImeAction,
+    onChange: (String) -> Unit,
+    onGo: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val big = TextStyle(
+        fontSize = 28.sp, fontFamily = FontFamily.Monospace,
+        fontWeight = FontWeight.Bold, textAlign = TextAlign.Center
+    )
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(64.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Slate2)
+                .border(1.dp, Chalk.copy(alpha = 0.25f), RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            BasicTextField(
+                value = value,
+                onValueChange = { onChange(it.filter { c -> c.isDigit() }.take(2)) },
+                singleLine = true,
+                textStyle = big.copy(color = Chalk),
+                cursorBrush = SolidColor(Amber),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = imeAction),
+                keyboardActions = KeyboardActions(onGo = { onGo() }),
+                decorationBox = { inner ->
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        if (value.isEmpty()) Text(hint, style = big.copy(color = Chalk.copy(alpha = 0.3f)))
+                        inner()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(label, color = Muted, fontSize = 11.sp)
     }
 }
 
