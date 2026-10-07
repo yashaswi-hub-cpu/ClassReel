@@ -11,8 +11,8 @@ android {
         applicationId = "com.classreel.player"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 2
+        versionName = "1.1"
         // Phones are ARM; dropping x86 libs roughly halves the APK
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }

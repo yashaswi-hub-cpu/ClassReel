@@ -9,7 +9,7 @@ Video player for lectures. Kotlin + Jetpack Compose + Media3 (ExoPlayer) + Vosk 
 - Smooth seeking: drag the seek bar and the video follows your finger (like VLC); skips and jumps land on the exact second.
 - Speed: 0.5x to 3x (pitch stays natural).
 - CC captions: Hinglish (Hindi speech written in English letters) or English (Indian accent). Runs offline after a one-time ~40 MB download.
-- History: remembers the exact second you stopped in each video. VLC-style History tab: thumbnails with duration badge and progress line, grouped by Today/Yesterday/This week/Earlier, search, long-press to select and delete, Clear all.
+- History: remembers the exact second you stopped in each video. Reopen the app days later and tap Resume.
 
 ## Home screen
 - Library tab: every video on your phone (asks for video access once). History tab: what you've watched, with resume.

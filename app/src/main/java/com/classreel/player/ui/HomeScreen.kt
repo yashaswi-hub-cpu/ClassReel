@@ -62,6 +62,33 @@ import com.classreel.player.util.fmtTime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+private object ThumbCache {
+    private val cache = LruCache<String, Bitmap>(40)
+    fun get(k: String): Bitmap? = cache.get(k)
+    fun put(k: String, b: Bitmap) {
+        cache.put(k, b)
+    }
+}
+
+private fun loadFrame(ctx: Context, item: HistoryItem): Bitmap? {
+    val mmr = MediaMetadataRetriever()
+    return try {
+        mmr.setDataSource(ctx, Uri.parse(item.uri))
+        val f = mmr.getFrameAtTime(item.positionMs * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        f?.let {
+            val h = (192f * it.height / it.width).toInt().coerceAtLeast(1)
+            Bitmap.createScaledBitmap(it, 192, h, true)
+        }
+    } catch (_: Throwable) {
+        null
+    } finally {
+        try {
+            mmr.release()
+        } catch (_: Throwable) {
+        }
+    }
+}
+
 @Composable
 fun HomeScreen(
     store: HistoryStore,
@@ -74,23 +101,9 @@ fun HomeScreen(
     val ctx = LocalContext.current
     var items by remember { mutableStateOf(store.all()) }
     var tab by remember { mutableIntStateOf(if (items.isEmpty()) 0 else 1) }
-    var query by remember { mutableStateOf("") }
-    var selected by remember { mutableStateOf(emptySet<String>()) }
-    var askClear by remember { mutableStateOf(false) }
+    val hero = items.firstOrNull { !it.finished } ?: items.firstOrNull()
     val videos by produceState(initialValue = emptyList<DeviceVideo>(), hasStorage, tab) {
         value = if (hasStorage && tab == 0) withContext(Dispatchers.IO) { VideoLibrary.query(ctx) } else emptyList()
-    }
-
-    if (askClear) {
-        ClearHistoryDialog(
-            onConfirm = {
-                store.clear()
-                items = emptyList()
-                selected = emptySet()
-                askClear = false
-            },
-            onDismiss = { askClear = false }
-        )
     }
 
     Box(Modifier.fillMaxSize().background(Ink)) {
@@ -99,7 +112,7 @@ fun HomeScreen(
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 130.dp)
         ) {
             item { Header() }
-            item { Tabs(tab) { tab = it; selected = emptySet(); if (it == 1) items = store.all() } }
+            item { Tabs(tab) { tab = it; if (it == 1) items = store.all() } }
             if (tab == 0) {
                 if (!hasStorage) {
                     item { StoragePrompt(onGrantStorage) }
@@ -115,21 +128,22 @@ fun HomeScreen(
                     items(videos, key = { it.uri.toString() }) { v -> LibraryRow(v) { onOpenVideo(v) } }
                 }
             } else {
-                historySection(
-                    items = items,
-                    query = query,
-                    onQuery = { query = it },
-                    selected = selected,
-                    onToggle = { u -> selected = if (u in selected) selected - u else selected + u },
-                    onOpen = onOpen,
-                    onDeleteSelected = {
-                        store.removeAll(selected)
-                        selected = emptySet()
-                        items = store.all()
-                    },
-                    onCancelSelect = { selected = emptySet() },
-                    onAskClear = { askClear = true }
-                )
+                if (hero == null) {
+                    item { EmptyState() }
+                } else {
+                    item { HeroCard(hero) { onOpen(hero) } }
+                    item { SectionTitle("History") }
+                    items(items, key = { it.uri }) { it2 ->
+                        HistoryRow(
+                            item = it2,
+                            onClick = { onOpen(it2) },
+                            onRemove = {
+                                store.remove(it2.uri)
+                                items = store.all()
+                            }
+                        )
+                    }
+                }
             }
         }
 
@@ -295,5 +309,126 @@ private fun EmptyState() {
             "Play a lecture and it shows up here, with the minute you stopped at.",
             color = Muted, fontSize = 14.sp
         )
+    }
+}
+
+@Composable
+private fun HeroCard(item: HistoryItem, onResume: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(24.dp))
+            .background(Slate)
+            .clickable(onClick = onResume)
+            .padding(22.dp)
+    ) {
+        Text(
+            if (item.finished) "WATCHED" else "CONTINUE WHERE YOU LEFT",
+            color = Amber, fontFamily = FontFamily.Monospace, fontSize = 12.sp, letterSpacing = 2.sp
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            item.name,
+            color = Chalk, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 22.sp,
+            maxLines = 2, overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(14.dp))
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                fmtTime(item.positionMs),
+                color = Amber, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 52.sp
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                if (item.durationMs > 0) "of ${fmtTime(item.durationMs)}" else "",
+                color = Muted, fontFamily = FontFamily.Monospace, fontSize = 15.sp,
+                modifier = Modifier.padding(bottom = 10.dp)
+            )
+        }
+        Text("Left ${ago(item.lastPlayed)}", color = Muted, fontSize = 13.sp)
+        Spacer(Modifier.height(16.dp))
+        Bar(item.fraction)
+        Spacer(Modifier.height(18.dp))
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(20.dp))
+                .background(Chalk)
+                .padding(horizontal = 20.dp, vertical = 10.dp)
+        ) {
+            Text(
+                if (item.finished) "Watch again" else "Resume from ${fmtTime(item.positionMs)}",
+                color = Ink, fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
+private fun Bar(fraction: Float) {
+    Box(
+        Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Chalk.copy(alpha = 0.15f))
+    ) {
+        Box(
+            Modifier.fillMaxWidth(fraction.coerceIn(0.02f, 1f)).height(6.dp)
+                .clip(RoundedCornerShape(3.dp)).background(Amber)
+        )
+    }
+}
+
+@Composable
+private fun HistoryRow(item: HistoryItem, onClick: () -> Unit, onRemove: () -> Unit) {
+    Column {
+        Row(
+            Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Thumb(item, Modifier.width(104.dp).height(64.dp).clip(RoundedCornerShape(12.dp)))
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    item.name, color = Chalk, fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    if (item.finished) "Finished · ${ago(item.lastPlayed)}"
+                    else "Left at ${fmtTime(item.positionMs)}" +
+                            (if (item.durationMs > 0) " / ${fmtTime(item.durationMs)}" else "") +
+                            " · ${ago(item.lastPlayed)}",
+                    color = Muted, fontFamily = FontFamily.Monospace, fontSize = 12.sp
+                )
+                Spacer(Modifier.height(8.dp))
+                Bar(item.fraction)
+            }
+            Box(Modifier.size(40.dp).clickable(onClick = onRemove), contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.Close, contentDescription = "Remove", tint = Muted, modifier = Modifier.size(18.dp))
+            }
+        }
+        ChalkLine()
+    }
+}
+
+@Composable
+private fun Thumb(item: HistoryItem, modifier: Modifier) {
+    val ctx = LocalContext.current
+    val bmp by produceState<Bitmap?>(initialValue = ThumbCache.get(item.uri), key1 = item.uri) {
+        if (value == null) {
+            val b = withContext(Dispatchers.IO) { loadFrame(ctx, item) }
+            if (b != null) {
+                ThumbCache.put(item.uri, b)
+                value = b
+            }
+        }
+    }
+    Box(modifier.background(Slate2), contentAlignment = Alignment.Center) {
+        val b = bmp
+        if (b != null) {
+            Image(
+                bitmap = b.asImageBitmap(), contentDescription = null,
+                contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Icon(Icons.Filled.PlayArrow, null, tint = Muted)
+        }
     }
 }

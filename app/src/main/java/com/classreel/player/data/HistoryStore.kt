@@ -72,16 +72,4 @@ class HistoryStore(context: Context) {
         list.removeAll { it.uri == uri }
         writeAll(list)
     }
-
-    @Synchronized
-    fun removeAll(uris: Set<String>) {
-        val list = readAll()
-        list.removeAll { it.uri in uris }
-        writeAll(list)
-    }
-
-    @Synchronized
-    fun clear() {
-        prefs.edit().putString("items", "[]").apply()
-    }
 }
